@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import random
 
+from hardcoded_improv.bayes_model import BayesianNoteModel, NoteContext
 from hardcoded_improv.chord_detector import ChordEvent
 from hardcoded_improv.scale_utils import note_name_to_pc, pentatonic_notes
 
@@ -44,6 +45,7 @@ def generate_improv_events(
     beats_per_bar: int = 4,
     seed: int | None = None,
     base_octave: int = 5,
+    bayes_model: BayesianNoteModel | None = None,
 ) -> list[NoteEvent]:
     """Generate deterministic rule-based improv MIDI events.
 
@@ -65,6 +67,10 @@ def generate_improv_events(
     motif = _motif_rng_pattern(rng)
     motif_pos = 0
     events: list[NoteEvent] = []
+    prev_degree = 0
+    prev_octave_offset = 0
+    prev_midi = 60
+    prev_dir = 0
 
     boundary_times = {round(ch.start_sec, 3) for ch in chord_timeline}
 
@@ -80,19 +86,49 @@ def generate_improv_events(
             continue
 
         near_boundary = round(t, 3) in boundary_times
+        octave = base_octave + rng.choice([-1, 0, 0, 0, 1])
         if near_boundary and rng.random() < 0.75:
-            chosen_pc = root_pc
+            chosen_degree = 0
+            chosen_pc = scale_pcs[chosen_degree]
             velocity = rng.randint(88, 112)
         else:
-            idx = motif[motif_pos % len(motif)]
-            motif_pos += 1
-            chosen_pc = scale_pcs[idx % len(scale_pcs)]
+            if bayes_model is not None:
+                ctx = NoteContext(
+                    prev_degree=prev_degree,
+                    beat_pos=i % 8,
+                    chord_quality=chord.quality,
+                    chord_root=root_pc,
+                    prev_interval_direction=prev_dir,
+                    prev_octave_offset=prev_octave_offset,
+                )
+                chosen_degree, sampled_oct = bayes_model.sample_next(ctx, rng)
+                chosen_degree = int(chosen_degree) % 5
+                chosen_pc = scale_pcs[chosen_degree]
+                octave = base_octave + sampled_oct
+            else:
+                idx = motif[motif_pos % len(motif)]
+                motif_pos += 1
+                chosen_degree = idx % len(scale_pcs)
+                chosen_pc = scale_pcs[chosen_degree]
+                octave = base_octave + rng.choice([-1, 0, 0, 0, 1])
             velocity = rng.randint(70, 105)
 
-        # Small octave movement.
-        octave = base_octave + rng.choice([-1, 0, 0, 0, 1])
+        if near_boundary and rng.random() < 0.5:
+            octave = base_octave
+
         midi_note = _pc_to_midi(chosen_pc, octave=octave)
         midi_note = max(36, min(96, midi_note))
+
+        if midi_note > prev_midi:
+            prev_dir = 1
+        elif midi_note < prev_midi:
+            prev_dir = -1
+        else:
+            prev_dir = 0
+
+        prev_degree = chosen_degree
+        prev_octave_offset = max(-2, min(2, octave - base_octave))
+        prev_midi = midi_note
 
         events.append(
             NoteEvent(

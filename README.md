@@ -8,6 +8,7 @@ Streaming-first Python prototype for live improv:
 - Estimates tempo + beat times from a rolling window (`librosa`)
 - Detects chord timeline + infers key from rolling windows
 - Generates rule-based pentatonic improv and outputs real-time MIDI
+- Trains/uses a lightweight Bayesian model for next-note choice
 
 ## Install
 
@@ -68,6 +69,18 @@ Dry-run mode (no MIDI output):
 python -m hardcoded_improv.cli improv --listen-bars 2 --play-bars 8 --dry-run --seed 42 --config config.yaml
 ```
 
+Use a trained Bayesian model during improv:
+
+```bash
+python -m hardcoded_improv.cli improv --listen-bars 2 --play-bars 8 --bayes-model model.json --config config.yaml
+```
+
+Train Bayesian model from MIDI solos:
+
+```bash
+python -m hardcoded_improv.cli train-bayes --midi-dir ./midi_solos --out model.json
+```
+
 ## Tests
 
 ```bash
@@ -82,3 +95,4 @@ Includes:
 - Chord detector tests (template matching and synthetic chord sequence)
 - Scale utility tests
 - Improv engine/event scheduling order tests
+- Bayesian model training/sampling test with synthetic MIDI

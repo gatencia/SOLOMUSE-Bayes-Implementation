@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import random
 import time
 from pathlib import Path
@@ -9,9 +10,11 @@ from pathlib import Path
 import numpy as np
 
 from hardcoded_improv.audio_io import LiveAudioInput, list_input_devices
+from hardcoded_improv.bayes_model import BayesianNoteModel
 from hardcoded_improv.chord_detector import detect_chords_over_time, infer_key_from_chords
 from hardcoded_improv.config import AppConfig, load_config
 from hardcoded_improv.improv_engine import generate_improv_events, loop_chord_progression
+from hardcoded_improv.midi_dataset import build_training_dataset
 from hardcoded_improv.midi_out import MidiOut, play_events_realtime
 from hardcoded_improv.tempo_estimator import compute_listen_seconds, estimate_bar_length_seconds, estimate_beat_times, estimate_bpm
 from hardcoded_improv.utils import save_wav_mono, setup_logging
@@ -127,6 +130,7 @@ def run_improv_baseline(
     seed: int | None,
     dry_run: bool,
     midi_port: str | None,
+    bayes_model_path: str | None,
 ) -> None:
     if listen_bars <= 0:
         raise ValueError("listen_bars must be > 0")
@@ -158,12 +162,21 @@ def run_improv_baseline(
     play_duration = bar_len * play_bars
     play_chords = loop_chord_progression(listened_chords, total_duration_sec=play_duration)
 
+    model: BayesianNoteModel | None = None
+    if bayes_model_path:
+        if os.path.exists(bayes_model_path):
+            model = BayesianNoteModel.load_json(bayes_model_path)
+            logger.info("Loaded Bayesian model: %s", bayes_model_path)
+        else:
+            logger.warning("Bayes model path not found: %s", bayes_model_path)
+
     events = generate_improv_events(
         bpm=bpm,
         chord_timeline=play_chords,
         play_bars=play_bars,
         beats_per_bar=4,
         seed=seed,
+        bayes_model=model,
     )
     logger.info("Generated %d note events", len(events))
 
@@ -173,6 +186,17 @@ def run_improv_baseline(
 
     with MidiOut(port_name=midi_port) as out:
         play_events_realtime(events, midi_out=out, dry_run=False)
+
+
+def run_train_bayes(midi_dir: str, out_path: str, laplace: float = 1.0) -> None:
+    dataset = build_training_dataset(midi_dir)
+    if not dataset:
+        raise RuntimeError("No training samples found in MIDI directory")
+
+    model = BayesianNoteModel(laplace=laplace)
+    model.fit(dataset)
+    model.save_json(out_path)
+    logger.info("Saved Bayesian model to %s", out_path)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -196,6 +220,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     improv_parser.add_argument("--seed", type=int, default=None, help="Deterministic random seed")
     improv_parser.add_argument("--dry-run", action="store_true", help="Print/schedule events without MIDI output")
     improv_parser.add_argument("--midi-port", type=str, default=None, help="MIDI output port name (optional)")
+    improv_parser.add_argument("--bayes-model", type=str, default=None, help="Path to trained Bayesian model JSON")
+
+    train_parser = subparsers.add_parser("train-bayes", help="Train Bayesian note model from MIDI files")
+    train_parser.add_argument("--midi-dir", type=str, required=True, help="Directory containing .mid/.midi files")
+    train_parser.add_argument("--out", type=str, required=True, help="Output JSON model path")
+    train_parser.add_argument("--laplace", type=float, default=1.0, help="Laplace smoothing factor")
 
     return parser
 
@@ -226,7 +256,10 @@ def main() -> None:
                 seed=args.seed,
                 dry_run=args.dry_run,
                 midi_port=args.midi_port,
+                bayes_model_path=args.bayes_model,
             )
+        elif command == "train-bayes":
+            run_train_bayes(args.midi_dir, args.out, laplace=args.laplace)
         else:
             run_demo(cfg)
     except KeyboardInterrupt:
