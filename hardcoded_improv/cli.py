@@ -11,7 +11,9 @@ import numpy as np
 from hardcoded_improv.audio_io import LiveAudioInput, list_input_devices
 from hardcoded_improv.chord_detector import detect_chords_over_time, infer_key_from_chords
 from hardcoded_improv.config import AppConfig, load_config
-from hardcoded_improv.tempo_estimator import estimate_beat_times, estimate_bpm
+from hardcoded_improv.improv_engine import generate_improv_events, loop_chord_progression
+from hardcoded_improv.midi_out import MidiOut, play_events_realtime
+from hardcoded_improv.tempo_estimator import compute_listen_seconds, estimate_bar_length_seconds, estimate_beat_times, estimate_bpm
 from hardcoded_improv.utils import save_wav_mono, setup_logging
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,61 @@ def run_chords_probe(cfg: AppConfig, seconds: float) -> None:
         )
 
 
+def run_improv_baseline(
+    cfg: AppConfig,
+    listen_bars: int,
+    play_bars: int,
+    seed: int | None,
+    dry_run: bool,
+    midi_port: str | None,
+) -> None:
+    if listen_bars <= 0:
+        raise ValueError("listen_bars must be > 0")
+    if play_bars <= 0:
+        raise ValueError("play_bars must be > 0")
+
+    logger.info("Starting baseline improv (listen_bars=%d, play_bars=%d)", listen_bars, play_bars)
+    with LiveAudioInput(cfg) as engine:
+        bootstrap_sec = 4.0
+        logger.info("Bootstrap listening for %.2fs to estimate tempo", bootstrap_sec)
+        time.sleep(bootstrap_sec)
+
+        probe_audio = engine.get_last_seconds(bootstrap_sec)
+        bpm = estimate_bpm(probe_audio, cfg.sample_rate, previous_bpm=120.0)
+        listen_seconds = compute_listen_seconds(bpm, bars=listen_bars, beats_per_bar=4)
+
+        logger.info("Estimated BPM=%.2f, listen_seconds=%.2f", bpm, listen_seconds)
+        if listen_seconds > bootstrap_sec:
+            time.sleep(listen_seconds - bootstrap_sec)
+
+        listen_audio = engine.get_last_seconds(listen_seconds)
+
+    beat_times = estimate_beat_times(listen_audio, cfg.sample_rate)
+    listened_chords = detect_chords_over_time(listen_audio, cfg.sample_rate, frame_sec=0.5, beat_times=beat_times)
+    if not listened_chords:
+        logger.warning("No chords detected during listen phase. Falling back to C:maj")
+
+    bar_len = estimate_bar_length_seconds(bpm, beats_per_bar=4)
+    play_duration = bar_len * play_bars
+    play_chords = loop_chord_progression(listened_chords, total_duration_sec=play_duration)
+
+    events = generate_improv_events(
+        bpm=bpm,
+        chord_timeline=play_chords,
+        play_bars=play_bars,
+        beats_per_bar=4,
+        seed=seed,
+    )
+    logger.info("Generated %d note events", len(events))
+
+    if dry_run:
+        play_events_realtime(events, dry_run=True)
+        return
+
+    with MidiOut(port_name=midi_port) as out:
+        play_events_realtime(events, midi_out=out, dry_run=False)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Hardcoded live improv CLI")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config")
@@ -132,6 +189,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     chords_parser = subparsers.add_parser("chords", help="Estimate chord timeline from live audio")
     chords_parser.add_argument("--seconds", type=float, default=12.0, help="Rolling window size in seconds")
+
+    improv_parser = subparsers.add_parser("improv", help="Run rule-based pentatonic improv over detected chords")
+    improv_parser.add_argument("--listen-bars", type=int, default=2, help="Bars to listen before playing")
+    improv_parser.add_argument("--play-bars", type=int, default=8, help="Bars to play")
+    improv_parser.add_argument("--seed", type=int, default=None, help="Deterministic random seed")
+    improv_parser.add_argument("--dry-run", action="store_true", help="Print/schedule events without MIDI output")
+    improv_parser.add_argument("--midi-port", type=str, default=None, help="MIDI output port name (optional)")
 
     return parser
 
@@ -154,6 +218,15 @@ def main() -> None:
             run_tempo_probe(cfg, seconds=args.seconds)
         elif command == "chords":
             run_chords_probe(cfg, seconds=args.seconds)
+        elif command == "improv":
+            run_improv_baseline(
+                cfg,
+                listen_bars=args.listen_bars,
+                play_bars=args.play_bars,
+                seed=args.seed,
+                dry_run=args.dry_run,
+                midi_port=args.midi_port,
+            )
         else:
             run_demo(cfg)
     except KeyboardInterrupt:

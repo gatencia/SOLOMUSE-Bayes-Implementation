@@ -7,6 +7,7 @@ Streaming-first Python prototype for live improv:
 - Supports listen/play demo phases
 - Estimates tempo + beat times from a rolling window (`librosa`)
 - Detects chord timeline + infers key from rolling windows
+- Generates rule-based pentatonic improv and outputs real-time MIDI
 
 ## Install
 
@@ -55,6 +56,18 @@ The chords command prints:
 - Inferred key
 - Chord timeline with confidence
 
+Run baseline pentatonic improv:
+
+```bash
+python -m hardcoded_improv.cli improv --listen-bars 2 --play-bars 8 --config config.yaml
+```
+
+Dry-run mode (no MIDI output):
+
+```bash
+python -m hardcoded_improv.cli improv --listen-bars 2 --play-bars 8 --dry-run --seed 42 --config config.yaml
+```
+
 ## Tests
 
 ```bash
@@ -67,3 +80,5 @@ Includes:
 - WAV save test
 - Tempo estimator tests on synthetic click tracks
 - Chord detector tests (template matching and synthetic chord sequence)
+- Scale utility tests
+- Improv engine/event scheduling order tests
