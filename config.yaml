@@ -1,0 +1,9 @@
+sample_rate: 44100
+blocksize: 512
+input_device: null
+channels: 1
+ring_buffer_seconds: 20
+listen_seconds: 4.0
+play_seconds: 8.0
+log_level: INFO
+debug_wav_path: debug_last10s.wav
