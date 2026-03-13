@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from hardcoded_improv.audio_io import LiveAudioInput, list_input_devices
+from hardcoded_improv.chord_detector import detect_chords_over_time, infer_key_from_chords
 from hardcoded_improv.config import AppConfig, load_config
 from hardcoded_improv.tempo_estimator import estimate_beat_times, estimate_bpm
 from hardcoded_improv.utils import save_wav_mono, setup_logging
@@ -82,6 +83,41 @@ def run_tempo_probe(cfg: AppConfig, seconds: float) -> None:
         print(f"Beat times (s): {rounded}")
 
 
+def run_chords_probe(cfg: AppConfig, seconds: float) -> None:
+    if seconds <= 0:
+        raise ValueError("seconds must be > 0")
+
+    logger.info("Collecting %.2f seconds of audio for chord detection", seconds)
+    with LiveAudioInput(cfg) as engine:
+        t0 = time.monotonic()
+        while True:
+            elapsed = time.monotonic() - t0
+            if elapsed >= seconds:
+                break
+            level_db = engine.buffered_level_dbfs(0.25)
+            logger.info("[chords] level=%6.2f dBFS", level_db)
+            time.sleep(0.2)
+
+        audio = engine.get_last_seconds(seconds)
+
+    bpm = estimate_bpm(audio, cfg.sample_rate)
+    beat_times = estimate_beat_times(audio, cfg.sample_rate)
+    events = detect_chords_over_time(audio, cfg.sample_rate, frame_sec=0.5, beat_times=beat_times)
+    key_name = infer_key_from_chords(events)
+
+    print(f"Estimated BPM: {bpm:.2f}")
+    print(f"Inferred key: {key_name}")
+    if not events:
+        print("Chord timeline: []")
+        return
+
+    print("Chord timeline:")
+    for ev in events:
+        print(
+            f"  {ev.start_sec:6.2f}s -> {ev.end_sec:6.2f}s  {ev.root_note_name}:{ev.quality}  conf={ev.confidence:.2f}"
+        )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Hardcoded live improv CLI")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config")
@@ -93,6 +129,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     tempo_parser = subparsers.add_parser("tempo", help="Estimate tempo from live audio")
     tempo_parser.add_argument("--seconds", type=float, default=12.0, help="Rolling window size in seconds")
+
+    chords_parser = subparsers.add_parser("chords", help="Estimate chord timeline from live audio")
+    chords_parser.add_argument("--seconds", type=float, default=12.0, help="Rolling window size in seconds")
 
     return parser
 
@@ -113,6 +152,8 @@ def main() -> None:
     try:
         if command == "tempo":
             run_tempo_probe(cfg, seconds=args.seconds)
+        elif command == "chords":
+            run_chords_probe(cfg, seconds=args.seconds)
         else:
             run_demo(cfg)
     except KeyboardInterrupt:
