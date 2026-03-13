@@ -44,6 +44,15 @@ class LickConfig:
     use_pitch_bend: bool = False
 
 
+@dataclass
+class PhraseConfig:
+    phrase_len_bars: int = 2
+    enable_call_response: bool = True
+    strong_target_prob: float = 0.78
+    approach_prob: float = 0.68
+    max_jump_semitones: int = 9
+
+
 LICK_TEMPLATES: dict[str, list[list[int]]] = {
     "maj": [
         [0, 2, 1, 3],
@@ -252,6 +261,9 @@ def generate_improv_events(
     humanize_debug: bool = False,
     lick_config: LickConfig | None = None,
     lick_debug: bool = False,
+    humanize: HumanizeConfig | None = None,
+    lick_cfg: LickConfig | None = None,
+    phrase_cfg: PhraseConfig | None = None,
 ) -> list[NoteEvent]:
     """Generate deterministic rule-based improv MIDI events.
 
@@ -264,14 +276,50 @@ def generate_improv_events(
         return []
 
     rng = random.Random(seed)
-    hz = humanize_config or HumanizeConfig()
-    lk = lick_config or LickConfig()
+
+    # New preferred params + backward-compatible aliases.
+    hz_in = humanize if humanize is not None else humanize_config
+    lk_in = lick_cfg if lick_cfg is not None else lick_config
+    ph_in = phrase_cfg
+
+    if hz_in is None and lk_in is None and ph_in is None:
+        # "old simple style" defaults when no config knobs are provided.
+        hz = HumanizeConfig(
+            swing=0.0,
+            jitter_ms=0.0,
+            vel_jitter=0,
+            phrase_len_bars=2,
+            phrase_gap_prob=0.0,
+            staccato_prob=0.0,
+            legato_prob=0.0,
+            min_dur_frac=0.85,
+            max_dur_frac=0.85,
+        )
+        lk = LickConfig(
+            lick_prob_on_boundary=0.0,
+            lick_prob_on_phrase_start=0.0,
+            grace_note_prob=0.0,
+            slide_prob=0.0,
+            max_lick_len_steps=6,
+            use_pitch_bend=False,
+        )
+        ph = PhraseConfig(
+            phrase_len_bars=2,
+            enable_call_response=False,
+            strong_target_prob=0.0,
+            approach_prob=0.0,
+            max_jump_semitones=12,
+        )
+    else:
+        hz = hz_in or HumanizeConfig()
+        lk = lk_in or LickConfig()
+        ph = ph_in or PhraseConfig(phrase_len_bars=hz.phrase_len_bars)
 
     sec_per_beat = 60.0 / bpm
     step = sec_per_beat / 2.0  # eighth notes
     total_beats = play_bars * beats_per_bar
     total_steps = total_beats * 2
-    phrase_len_steps = max(1, int(hz.phrase_len_bars) * beats_per_bar * 2)
+    phrase_len_steps = max(1, int(ph.phrase_len_bars) * beats_per_bar * 2)
 
     motif = _motif_rng_pattern(rng)
     motif_pos = 0
@@ -288,7 +336,7 @@ def generate_improv_events(
     last_phrase_id = -1
     pending_target_step: int | None = None
     pending_target_degree: int | None = None
-    max_jump_semitones = 9
+    max_jump_semitones = max(1, int(ph.max_jump_semitones))
 
     boundary_times = {round(ch.start_sec, 3) for ch in chord_timeline}
 
@@ -304,7 +352,10 @@ def generate_improv_events(
                 call_motif = _generate_call_motif(rng, start_degree=prev_degree)
                 active_phrase_motif = list(call_motif)
             else:
-                active_phrase_motif = _mutate_response_motif(call_motif, rng)
+                if ph.enable_call_response:
+                    active_phrase_motif = _mutate_response_motif(call_motif, rng)
+                else:
+                    active_phrase_motif = list(call_motif)
             last_phrase_id = phrase_id
 
         if is_phrase_start and rng.random() < max(0.0, min(1.0, hz.phrase_gap_prob)):
@@ -379,14 +430,14 @@ def generate_improv_events(
                 pending_target_step = None
                 pending_target_degree = None
                 base_velocity = rng.randint(82, 110)
-            elif is_strong_beat and rng.random() < 0.78:
+            elif is_strong_beat and rng.random() < max(0.0, min(1.0, ph.strong_target_prob)):
                 if phrase_hint in target_degrees and rng.random() < 0.65:
                     chosen_degree = int(phrase_hint)
                 else:
                     chosen_degree = int(rng.choice(sorted(target_degrees)))
                 chosen_pc = scale_pcs[chosen_degree]
                 base_velocity = rng.randint(80, 110)
-            elif (not is_strong_beat) and next_step_is_strong and rng.random() < 0.68:
+            elif (not is_strong_beat) and next_step_is_strong and rng.random() < max(0.0, min(1.0, ph.approach_prob)):
                 upcoming_target = int(rng.choice(sorted(target_degrees)))
                 pending_target_step = i + 1
                 pending_target_degree = upcoming_target
