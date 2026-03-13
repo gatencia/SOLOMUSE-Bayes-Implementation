@@ -154,6 +154,10 @@ def estimate_bpm(audio: np.ndarray, sr: int, previous_bpm: float | None = None) 
         if valid:
             candidate_bpm = min(valid, key=lambda c: abs(c - onset_anchor_bpm))
 
+    # Heuristic for frequent half-tempo errors on sparse click-like material.
+    if np.isfinite(candidate_bpm) and candidate_bpm < 80.0 and _valid_bpm(candidate_bpm * 2.0):
+        candidate_bpm = candidate_bpm * 2.0
+
     if _valid_bpm(candidate_bpm):
         chosen_bpm = float(candidate_bpm)
         _last_valid_bpm = chosen_bpm
@@ -226,7 +230,23 @@ def estimate_beat_times(audio: np.ndarray, sr: int) -> np.ndarray:
         return grid
 
     beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=DEFAULT_HOP_LENGTH)
-    return np.asarray(beat_times, dtype=np.float32)
+    beat_times = np.asarray(beat_times, dtype=np.float32)
+
+    if beat_times.size >= 3 and bpm > 0:
+        target_period = 60.0 / bpm
+        observed = float(np.median(np.diff(beat_times)))
+        if abs(observed - target_period) > max(0.08, 0.25 * target_period):
+            duration_s = y.size / float(sr)
+            grid = np.arange(0.0, duration_s, target_period, dtype=np.float32)
+            logger.info(
+                "Beat timeline corrected to BPM grid: observed_period=%.3f target_period=%.3f count=%d",
+                observed,
+                target_period,
+                grid.size,
+            )
+            return grid
+
+    return beat_times
 
 
 def estimate_bar_length_seconds(bpm: float, beats_per_bar: int = 4) -> float:

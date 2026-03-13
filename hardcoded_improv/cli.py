@@ -14,8 +14,9 @@ from hardcoded_improv.bayes_model import BayesianNoteModel
 from hardcoded_improv.chord_detector import detect_chords_over_time, infer_key_from_chords
 from hardcoded_improv.config import AppConfig, load_config
 from hardcoded_improv.improv_engine import generate_improv_events, loop_chord_progression
+from hardcoded_improv.live_demo import run_live_demo, run_simulation_demo
 from hardcoded_improv.midi_dataset import build_training_dataset
-from hardcoded_improv.midi_out import MidiOut, play_events_realtime
+from hardcoded_improv.midi_out import MidiOut, list_midi_output_ports, play_events_realtime
 from hardcoded_improv.tempo_estimator import compute_listen_seconds, estimate_bar_length_seconds, estimate_beat_times, estimate_bpm
 from hardcoded_improv.utils import save_wav_mono, setup_logging
 
@@ -203,6 +204,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Hardcoded live improv CLI")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config")
     parser.add_argument("--list-devices", action="store_true", help="List available input devices")
+    parser.add_argument("--list-midi-ports", action="store_true", help="List available MIDI output ports")
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -227,6 +229,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--out", type=str, required=True, help="Output JSON model path")
     train_parser.add_argument("--laplace", type=float, default=1.0, help="Laplace smoothing factor")
 
+    live_parser = subparsers.add_parser("live", help="End-to-end live demo with artifact outputs")
+    live_parser.add_argument("--midi-port", type=str, default=None, help="MIDI output port name")
+    live_parser.add_argument("--listen-bars", type=int, default=2, help="Bars to listen")
+    live_parser.add_argument("--play-bars", type=int, default=16, help="Bars to play")
+    live_parser.add_argument("--artifacts-dir", type=str, default="artifacts/live_demo", help="Artifact output directory")
+    live_parser.add_argument("--seed", type=int, default=42, help="Deterministic seed for note generation")
+    live_parser.add_argument("--bayes-model", type=str, default=None, help="Path to Bayesian model JSON")
+    live_parser.add_argument("--dry-run", action="store_true", help="Do not send MIDI, only schedule events")
+    live_parser.add_argument("--output-mid", action="store_true", help="Also save output.mid artifact")
+    live_parser.add_argument("--input-wav", type=str, default=None, help="Simulation mode input WAV path")
+    live_parser.add_argument("--prefer-input-name", type=str, default="scarlett", help="Preferred live input device name substring")
+
     return parser
 
 
@@ -241,6 +255,10 @@ def main() -> None:
     if args.list_devices:
         for idx, name in list_input_devices():
             print(f"{idx}: {name}")
+        return
+    if args.list_midi_ports:
+        for name in list_midi_output_ports():
+            print(name)
         return
 
     try:
@@ -260,6 +278,40 @@ def main() -> None:
             )
         elif command == "train-bayes":
             run_train_bayes(args.midi_dir, args.out, laplace=args.laplace)
+        elif command == "live":
+            if args.input_wav:
+                result = run_simulation_demo(
+                    cfg,
+                    input_wav=args.input_wav,
+                    listen_bars=args.listen_bars,
+                    play_bars=args.play_bars,
+                    artifacts_dir=args.artifacts_dir,
+                    seed=args.seed,
+                    bayes_model_path=args.bayes_model,
+                    output_mid=True if args.output_mid or args.input_wav else args.output_mid,
+                )
+            else:
+                result = run_live_demo(
+                    cfg,
+                    midi_port=args.midi_port,
+                    listen_bars=args.listen_bars,
+                    play_bars=args.play_bars,
+                    artifacts_dir=args.artifacts_dir,
+                    seed=args.seed,
+                    bayes_model_path=args.bayes_model,
+                    output_mid=args.output_mid,
+                    dry_run=args.dry_run,
+                    prefer_input_name=args.prefer_input_name,
+                )
+
+            print(f"BPM: {result.bpm:.2f}")
+            print(f"Chords: {result.chord_count}")
+            print(f"Events: {result.event_count}")
+            print(f"listen_audio.wav: {result.listen_audio_path}")
+            print(f"chords.json: {result.chords_json_path}")
+            print(f"events.csv: {result.events_csv_path}")
+            if result.output_mid_path is not None:
+                print(f"output.mid: {result.output_mid_path}")
         else:
             run_demo(cfg)
     except KeyboardInterrupt:

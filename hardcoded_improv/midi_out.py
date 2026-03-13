@@ -14,6 +14,12 @@ except Exception:  # pragma: no cover - runtime optional dependency path
     mido = None
 
 
+def list_midi_output_ports() -> list[str]:
+    if mido is None:
+        return []
+    return [str(x) for x in mido.get_output_names()]
+
+
 @dataclass
 class ScheduledMidiEvent:
     time_sec: float

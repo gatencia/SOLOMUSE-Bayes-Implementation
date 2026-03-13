@@ -81,6 +81,32 @@ Train Bayesian model from MIDI solos:
 python -m hardcoded_improv.cli train-bayes --midi-dir ./midi_solos --out model.json
 ```
 
+End-to-end live demo (input audio → BPM/chords → MIDI solo + artifacts):
+
+```bash
+python -m hardcoded_improv.cli live --midi-port "<your-port>" --listen-bars 2 --play-bars 16 --output-mid --config config.yaml
+```
+
+Simulation mode (WAV input, CI-friendly, always writes artifacts):
+
+```bash
+python -m hardcoded_improv.cli live --input-wav ./example.wav --listen-bars 2 --play-bars 8 --artifacts-dir ./artifacts/sim --config config.yaml
+```
+
+Select Scarlett + MIDI port:
+
+- List audio inputs and use your Scarlett name/index in YAML `input_device` (or rely on auto-match):
+
+```bash
+python -m hardcoded_improv.cli --list-devices
+```
+
+- List MIDI outputs and copy exact port name for `--midi-port`:
+
+```bash
+python -m hardcoded_improv.cli --list-midi-ports
+```
+
 ## Tests
 
 ```bash
@@ -96,3 +122,4 @@ Includes:
 - Scale utility tests
 - Improv engine/event scheduling order tests
 - Bayesian model training/sampling test with synthetic MIDI
+- Integration test for simulation live demo artifacts
