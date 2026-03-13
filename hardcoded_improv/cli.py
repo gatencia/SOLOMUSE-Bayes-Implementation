@@ -239,6 +239,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--dry-run", action="store_true", help="Do not send MIDI, only schedule events")
     live_parser.add_argument("--output-mid", action="store_true", help="Also save output.mid artifact")
     live_parser.add_argument("--input-wav", type=str, default=None, help="Simulation mode input WAV path")
+    live_parser.add_argument(
+        "--full-wav-listen",
+        action="store_true",
+        help="In simulation mode, analyze full WAV for chord timeline instead of listen-bars window",
+    )
     live_parser.add_argument("--prefer-input-name", type=str, default="scarlett", help="Preferred live input device name substring")
 
     return parser
@@ -289,6 +294,7 @@ def main() -> None:
                     seed=args.seed,
                     bayes_model_path=args.bayes_model,
                     output_mid=True if args.output_mid or args.input_wav else args.output_mid,
+                    full_wav_listen=args.full_wav_listen,
                 )
             else:
                 result = run_live_demo(

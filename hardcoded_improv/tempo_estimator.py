@@ -148,20 +148,33 @@ def estimate_bpm(audio: np.ndarray, sr: int, previous_bpm: float | None = None) 
                 onset_anchor_bpm = 60.0 / median_ioi
 
     candidate_bpm = raw_bpm
+    tempo_reason = "raw"
     if np.isfinite(raw_bpm) and np.isfinite(onset_anchor_bpm):
         candidates = [raw_bpm, raw_bpm / 2.0, raw_bpm * 2.0]
         valid = [c for c in candidates if _valid_bpm(c)]
         if valid:
-            candidate_bpm = min(valid, key=lambda c: abs(c - onset_anchor_bpm))
+            best = min(valid, key=lambda c: abs(c - onset_anchor_bpm))
+            ratio = best / raw_bpm if raw_bpm > 0 else 1.0
+
+            # Guard against common double-time/half-time ambiguity:
+            # if raw tempo is already in a stable midrange, keep raw.
+            is_octave_shift = abs(ratio - 2.0) < 0.15 or abs(ratio - 0.5) < 0.08
+            if is_octave_shift and 85.0 <= raw_bpm <= 175.0:
+                candidate_bpm = raw_bpm
+                tempo_reason = "raw_midrange_guard"
+            else:
+                candidate_bpm = best
+                tempo_reason = "octave_corrected"
 
     # Heuristic for frequent half-tempo errors on sparse click-like material.
     if np.isfinite(candidate_bpm) and candidate_bpm < 80.0 and _valid_bpm(candidate_bpm * 2.0):
         candidate_bpm = candidate_bpm * 2.0
+        tempo_reason = "low_bpm_doubled"
 
     if _valid_bpm(candidate_bpm):
         chosen_bpm = float(candidate_bpm)
         _last_valid_bpm = chosen_bpm
-        reason = "raw_or_octave_corrected"
+        reason = tempo_reason
     else:
         if previous_bpm is not None and _valid_bpm(previous_bpm):
             chosen_bpm = float(previous_bpm)

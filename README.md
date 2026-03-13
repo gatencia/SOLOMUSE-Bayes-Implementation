@@ -93,6 +93,12 @@ Simulation mode (WAV input, CI-friendly, always writes artifacts):
 python -m hardcoded_improv.cli live --input-wav ./example.wav --listen-bars 2 --play-bars 8 --artifacts-dir ./artifacts/sim --config config.yaml
 ```
 
+To analyze the full WAV chord progression (instead of only the listen-bars window):
+
+```bash
+python -m hardcoded_improv.cli live --input-wav ./example.wav --full-wav-listen --listen-bars 2 --play-bars 8 --artifacts-dir ./artifacts/sim --config config.yaml
+```
+
 Select Scarlett + MIDI port:
 
 - List audio inputs and use your Scarlett name/index in YAML `input_device` (or rely on auto-match):

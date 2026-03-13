@@ -262,6 +262,7 @@ def run_simulation_demo(
     seed: int | None = None,
     bayes_model_path: str | None = None,
     output_mid: bool = True,
+    full_wav_listen: bool = False,
 ) -> LiveDemoResult:
     if listen_bars <= 0 or play_bars <= 0:
         raise ValueError("listen_bars and play_bars must be > 0")
@@ -278,14 +279,21 @@ def run_simulation_demo(
         raise RuntimeError("Input WAV is too short for bootstrap tempo estimation")
     bootstrap_audio = audio[: int(bootstrap_sec * sr)]
     bootstrap_bpm = estimate_bpm(bootstrap_audio, sr, previous_bpm=120.0)
-    listen_seconds = compute_listen_seconds(bootstrap_bpm, bars=listen_bars, beats_per_bar=4)
-    listen_samples = int(round(listen_seconds * sr))
-    if audio.size < listen_samples:
-        raise RuntimeError(
-            f"Input WAV is too short for listen phase: need {listen_seconds:.2f}s, got {audio.size / sr:.2f}s"
-        )
 
-    listen_audio = audio[:listen_samples]
+    if full_wav_listen:
+        listen_audio = audio
+        logger.info(
+            "Simulation listen mode: full WAV (%.2fs)",
+            audio.size / float(sr),
+        )
+    else:
+        listen_seconds = compute_listen_seconds(bootstrap_bpm, bars=listen_bars, beats_per_bar=4)
+        listen_samples = int(round(listen_seconds * sr))
+        if audio.size < listen_samples:
+            raise RuntimeError(
+                f"Input WAV is too short for listen phase: need {listen_seconds:.2f}s, got {audio.size / sr:.2f}s"
+            )
+        listen_audio = audio[:listen_samples]
     bpm, chords, events = _compute_pipeline(
         listen_audio,
         sr,

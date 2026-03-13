@@ -1,0 +1,19 @@
+{
+  "bpm": 147.65625,
+  "chords": [
+    {
+      "start_sec": 0.03482993319630623,
+      "end_sec": 1.5092970132827759,
+      "root_note_name": "C#",
+      "quality": "min",
+      "confidence": 0.5952429175376892
+    },
+    {
+      "start_sec": 1.5092970132827759,
+      "end_sec": 2.182675838470459,
+      "root_note_name": "A",
+      "quality": "min",
+      "confidence": 0.5657162070274353
+    }
+  ]
+}
