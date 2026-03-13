@@ -34,6 +34,34 @@ class HumanizeConfig:
     max_dur_frac: float = 0.95
 
 
+@dataclass
+class LickConfig:
+    lick_prob_on_boundary: float = 0.35
+    lick_prob_on_phrase_start: float = 0.45
+    grace_note_prob: float = 0.20
+    slide_prob: float = 0.10
+    max_lick_len_steps: int = 6
+    use_pitch_bend: bool = False
+
+
+LICK_TEMPLATES: dict[str, list[list[int]]] = {
+    "maj": [
+        [0, 2, 1, 3],
+        [2, 1, 0, 1],
+        [0, 1, 2, 1],
+        [0, 2, 0],
+        [1, 3, 2, 4],
+    ],
+    "min": [
+        [0, 1, 2, 1],
+        [2, 1, 0, 1],
+        [0, 2, 1, 3],
+        [0, 2, 0],
+        [3, 2, 1, 0],
+    ],
+}
+
+
 def _mode_from_quality(quality: str) -> str:
     return "major" if quality == "maj" else "minor"
 
@@ -134,6 +162,36 @@ def _duration_with_articulation(
     return float(max(1e-4, step * frac))
 
 
+def _pick_lick_template(
+    mode: str,
+    prev_dir: int,
+    beat_pos: int,
+    beats_per_bar: int,
+    max_len: int,
+    rng: random.Random,
+) -> list[int]:
+    pool = LICK_TEMPLATES.get(mode, LICK_TEMPLATES["maj"])
+
+    strong_positions = {0}
+    if beats_per_bar >= 4:
+        strong_positions.add((beats_per_bar // 2) * 2)
+    is_strong = beat_pos in strong_positions
+
+    candidates = pool
+    if prev_dir > 0:
+        candidates = [p for p in pool if p[-1] >= p[0]] or pool
+    elif prev_dir < 0:
+        candidates = [p for p in pool if p[-1] <= p[0]] or pool
+
+    if is_strong:
+        candidates = sorted(candidates, key=len, reverse=True)
+
+    chosen = list(rng.choice(candidates))
+    max_l = max(1, int(max_len))
+    chosen = chosen[:max_l]
+    return [int(max(0, min(4, d))) for d in chosen]
+
+
 def generate_improv_events(
     bpm: float,
     chord_timeline: list[ChordEvent],
@@ -144,6 +202,8 @@ def generate_improv_events(
     bayes_model: BayesianNoteModel | None = None,
     humanize_config: HumanizeConfig | None = None,
     humanize_debug: bool = False,
+    lick_config: LickConfig | None = None,
+    lick_debug: bool = False,
 ) -> list[NoteEvent]:
     """Generate deterministic rule-based improv MIDI events.
 
@@ -157,6 +217,7 @@ def generate_improv_events(
 
     rng = random.Random(seed)
     hz = humanize_config or HumanizeConfig()
+    lk = lick_config or LickConfig()
 
     sec_per_beat = 60.0 / bpm
     step = sec_per_beat / 2.0  # eighth notes
@@ -173,6 +234,7 @@ def generate_improv_events(
     prev_dir = 0
     prev_time_h: float | None = None
     rest_count = 0
+    current_lick: list[int] = []
 
     boundary_times = {round(ch.start_sec, 3) for ch in chord_timeline}
 
@@ -201,15 +263,50 @@ def generate_improv_events(
 
         near_boundary = round(t, 3) in boundary_times
         octave = base_octave + rng.choice([-1, 0, 0, 0, 1])
+        beat_pos = i % (beats_per_bar * 2)
+
+        if not current_lick:
+            p = 0.0
+            if near_boundary:
+                p = max(p, float(lk.lick_prob_on_boundary))
+            if is_phrase_start:
+                p = max(p, float(lk.lick_prob_on_phrase_start))
+
+            if p > 0.0 and rng.random() < min(1.0, p):
+                current_lick = _pick_lick_template(
+                    mode=mode,
+                    prev_dir=prev_dir,
+                    beat_pos=beat_pos,
+                    beats_per_bar=beats_per_bar,
+                    max_len=lk.max_lick_len_steps,
+                    rng=rng,
+                )
+                if lick_debug:
+                    logger.info(
+                        "Lick start: template=%s step=%d chord=%s:%s mode=%s",
+                        current_lick,
+                        i,
+                        chord.root_note_name,
+                        chord.quality,
+                        mode,
+                    )
+
+        chosen_from_lick = False
         if near_boundary and rng.random() < 0.75:
             chosen_degree = 0
             chosen_pc = scale_pcs[chosen_degree]
             base_velocity = rng.randint(88, 112)
         else:
-            if bayes_model is not None:
+            if current_lick:
+                chosen_degree = int(current_lick.pop(0))
+                chosen_degree = max(0, min(4, chosen_degree))
+                chosen_pc = scale_pcs[chosen_degree]
+                chosen_from_lick = True
+                base_velocity = rng.randint(74, 108)
+            elif bayes_model is not None:
                 ctx = NoteContext(
                     prev_degree=prev_degree,
-                    beat_pos=i % (beats_per_bar * 2),
+                    beat_pos=beat_pos,
                     chord_quality=chord.quality,
                     chord_root=root_pc,
                     prev_interval_direction=prev_dir,
@@ -219,13 +316,14 @@ def generate_improv_events(
                 chosen_degree = int(chosen_degree) % 5
                 chosen_pc = scale_pcs[chosen_degree]
                 octave = base_octave + sampled_oct
+                base_velocity = rng.randint(70, 105)
             else:
                 idx = motif[motif_pos % len(motif)]
                 motif_pos += 1
                 chosen_degree = idx % len(scale_pcs)
                 chosen_pc = scale_pcs[chosen_degree]
                 octave = base_octave + rng.choice([-1, 0, 0, 0, 1])
-            base_velocity = rng.randint(70, 105)
+                base_velocity = rng.randint(70, 105)
 
         if near_boundary and rng.random() < 0.5:
             octave = base_octave
@@ -256,6 +354,51 @@ def generate_improv_events(
 
         midi_note = _pc_to_midi(chosen_pc, octave=octave)
         midi_note = max(36, min(96, midi_note))
+
+        # Ornament layer (kept simple for MIDI note-only pipeline).
+        inserted_ornament = False
+        slide_prob = max(0.0, min(1.0, float(lk.slide_prob)))
+        grace_prob = max(0.0, min(1.0, float(lk.grace_note_prob)))
+
+        if rng.random() < slide_prob:
+            if lk.use_pitch_bend:
+                # TODO: add pitch-bend event structure in MIDI writer and emit ramp here.
+                if lick_debug:
+                    logger.info("Slide requested with pitch-bend path at step=%d (TODO, currently no-op)", i)
+            else:
+                a_time = max(0.0, t_h - 0.08)
+                if prev_time_h is None or a_time >= prev_time_h:
+                    approach = max(36, min(96, midi_note - 1))
+                    a_vel = max(1, min(127, velocity - 10))
+                    a_dur = max(0.015, min(0.06, note_dur * 0.3))
+                    events.append(
+                        NoteEvent(
+                            time_sec=float(a_time),
+                            midi_note=int(approach),
+                            velocity=int(a_vel),
+                            duration_sec=float(a_dur),
+                        )
+                    )
+                    inserted_ornament = True
+
+        if (not inserted_ornament) and rng.random() < grace_prob:
+            grace_offset = rng.uniform(0.03, 0.06)
+            g_time = max(0.0, t_h - grace_offset)
+            if prev_time_h is None or g_time >= prev_time_h:
+                step_dir = -1 if rng.random() < 0.65 else 1
+                grace_note = max(36, min(96, midi_note + step_dir * rng.choice([1, 2])))
+                g_vel = max(1, min(127, velocity - rng.randint(6, 14)))
+                g_dur = max(0.012, min(0.05, note_dur * 0.25))
+                events.append(
+                    NoteEvent(
+                        time_sec=float(g_time),
+                        midi_note=int(grace_note),
+                        velocity=int(g_vel),
+                        duration_sec=float(g_dur),
+                    )
+                )
+                if lick_debug:
+                    logger.info("Grace note inserted: step=%d time=%.3f note=%d -> %d", i, g_time, grace_note, midi_note)
 
         if midi_note > prev_midi:
             prev_dir = 1
