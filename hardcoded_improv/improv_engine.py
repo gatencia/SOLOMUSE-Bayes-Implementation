@@ -62,6 +62,54 @@ LICK_TEMPLATES: dict[str, list[list[int]]] = {
 }
 
 
+def _target_degrees_for_mode(mode: str) -> set[int]:
+    if mode == "minor":
+        return {0, 2, 3}
+    return {0, 2, 4}
+
+
+def _generate_call_motif(rng: random.Random, start_degree: int) -> list[int]:
+    length = rng.randint(4, 6)
+    out = [int(max(0, min(4, start_degree)))]
+    for _ in range(length - 1):
+        step = rng.choice([-1, 0, 1, 1])
+        out.append(int(max(0, min(4, out[-1] + step))))
+    return out
+
+
+def _mutate_response_motif(base: list[int], rng: random.Random) -> list[int]:
+    if not base:
+        return _generate_call_motif(rng, start_degree=0)
+    m = list(base)
+    idx = rng.randrange(len(m))
+    m[idx] = int(max(0, min(4, m[idx] + rng.choice([-1, 1]))))
+    if rng.random() < 0.35:
+        m = list(reversed(m))
+    return m
+
+
+def _stepwise_degree(prev_degree: int, rng: random.Random) -> int:
+    return int(max(0, min(4, prev_degree + rng.choice([-1, 0, 1]))))
+
+
+def _clamp_jump_by_octave(midi_note: int, prev_midi: int, max_jump: int = 9) -> int:
+    n = int(midi_note)
+    if abs(n - prev_midi) <= max_jump:
+        return n
+
+    while n - prev_midi > max_jump and n - 12 >= 36:
+        n -= 12
+    while prev_midi - n > max_jump and n + 12 <= 96:
+        n += 12
+
+    if n - prev_midi > max_jump:
+        n = prev_midi + max_jump
+    elif prev_midi - n > max_jump:
+        n = prev_midi - max_jump
+
+    return int(max(36, min(96, n)))
+
+
 def _mode_from_quality(quality: str) -> str:
     return "major" if quality == "maj" else "minor"
 
@@ -235,14 +283,29 @@ def generate_improv_events(
     prev_time_h: float | None = None
     rest_count = 0
     current_lick: list[int] = []
+    call_motif: list[int] = []
+    active_phrase_motif: list[int] = []
+    last_phrase_id = -1
+    pending_target_step: int | None = None
+    pending_target_degree: int | None = None
+    max_jump_semitones = 9
 
     boundary_times = {round(ch.start_sec, 3) for ch in chord_timeline}
 
     for i in range(total_steps):
         t = i * step
+        phrase_id = i // phrase_len_steps
         phrase_pos = i % phrase_len_steps
         is_phrase_start = phrase_pos == 0
         is_phrase_tail = phrase_pos >= max(0, phrase_len_steps - 1)
+
+        if phrase_id != last_phrase_id:
+            if phrase_id % 2 == 0:
+                call_motif = _generate_call_motif(rng, start_degree=prev_degree)
+                active_phrase_motif = list(call_motif)
+            else:
+                active_phrase_motif = _mutate_response_motif(call_motif, rng)
+            last_phrase_id = phrase_id
 
         if is_phrase_start and rng.random() < max(0.0, min(1.0, hz.phrase_gap_prob)):
             rest_count += 1
@@ -264,6 +327,13 @@ def generate_improv_events(
         near_boundary = round(t, 3) in boundary_times
         octave = base_octave + rng.choice([-1, 0, 0, 0, 1])
         beat_pos = i % (beats_per_bar * 2)
+        beat_in_bar = (i // 2) % beats_per_bar
+        is_onbeat = i % 2 == 0
+        is_strong_beat = is_onbeat and (beat_in_bar == 0 or (beats_per_bar >= 4 and beat_in_bar == 2))
+        next_step_is_strong = ((i + 1) % 2 == 0) and (((i + 1) // 2) % beats_per_bar in {0, 2 if beats_per_bar >= 4 else 0})
+
+        target_degrees = _target_degrees_for_mode(mode)
+        phrase_hint = active_phrase_motif[phrase_pos % len(active_phrase_motif)] if active_phrase_motif else prev_degree
 
         if not current_lick:
             p = 0.0
@@ -303,6 +373,32 @@ def generate_improv_events(
                 chosen_pc = scale_pcs[chosen_degree]
                 chosen_from_lick = True
                 base_velocity = rng.randint(74, 108)
+            elif pending_target_step is not None and pending_target_degree is not None and i == pending_target_step:
+                chosen_degree = int(max(0, min(4, pending_target_degree)))
+                chosen_pc = scale_pcs[chosen_degree]
+                pending_target_step = None
+                pending_target_degree = None
+                base_velocity = rng.randint(82, 110)
+            elif is_strong_beat and rng.random() < 0.78:
+                if phrase_hint in target_degrees and rng.random() < 0.65:
+                    chosen_degree = int(phrase_hint)
+                else:
+                    chosen_degree = int(rng.choice(sorted(target_degrees)))
+                chosen_pc = scale_pcs[chosen_degree]
+                base_velocity = rng.randint(80, 110)
+            elif (not is_strong_beat) and next_step_is_strong and rng.random() < 0.68:
+                upcoming_target = int(rng.choice(sorted(target_degrees)))
+                pending_target_step = i + 1
+                pending_target_degree = upcoming_target
+                if upcoming_target <= 0:
+                    chosen_degree = 1
+                elif upcoming_target >= 4:
+                    chosen_degree = 3
+                else:
+                    chosen_degree = int(upcoming_target + rng.choice([-1, 1]))
+                chosen_degree = max(0, min(4, chosen_degree))
+                chosen_pc = scale_pcs[chosen_degree]
+                base_velocity = rng.randint(68, 100)
             elif bayes_model is not None:
                 ctx = NoteContext(
                     prev_degree=prev_degree,
@@ -318,9 +414,16 @@ def generate_improv_events(
                 octave = base_octave + sampled_oct
                 base_velocity = rng.randint(70, 105)
             else:
-                idx = motif[motif_pos % len(motif)]
-                motif_pos += 1
-                chosen_degree = idx % len(scale_pcs)
+                if rng.random() < 0.65:
+                    chosen_degree = _stepwise_degree(prev_degree, rng)
+                else:
+                    idx = motif[motif_pos % len(motif)]
+                    motif_pos += 1
+                    chosen_degree = idx % len(scale_pcs)
+
+                if active_phrase_motif and rng.random() < 0.40:
+                    chosen_degree = int(max(0, min(4, phrase_hint)))
+
                 chosen_pc = scale_pcs[chosen_degree]
                 octave = base_octave + rng.choice([-1, 0, 0, 0, 1])
                 base_velocity = rng.randint(70, 105)
@@ -354,6 +457,11 @@ def generate_improv_events(
 
         midi_note = _pc_to_midi(chosen_pc, octave=octave)
         midi_note = max(36, min(96, midi_note))
+
+        if not is_phrase_start:
+            midi_note = _clamp_jump_by_octave(midi_note, prev_midi, max_jump=max_jump_semitones)
+        elif is_phrase_tail and rng.random() < 0.20:
+            midi_note = int(max(36, min(96, midi_note + 12)))
 
         # Ornament layer (kept simple for MIDI note-only pipeline).
         inserted_ornament = False
