@@ -61,6 +61,8 @@ def _write_midi(path: Path, events, bpm: float) -> None:
     tr = mido.MidiTrack()
     mid.tracks.append(tr)
     tr.append(mido.MetaMessage("set_tempo", tempo=tempo, time=0))
+    tr.append(mido.MetaMessage("track_name", name="SOLOMUSE Smoke Lead", time=0))
+    tr.append(mido.Message("program_change", program=29, channel=0, time=0))
 
     last_tick = 0
     for t, kind, note, vel in timeline:

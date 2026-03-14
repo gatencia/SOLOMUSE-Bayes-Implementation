@@ -1,15 +1,15 @@
 {
-  "bpm": 219.91356382978722,
+  "bpm": 109.95678191489361,
   "chords": [
     {
       "start_sec": 0.03482993319630623,
-      "end_sec": 4.109931945800781,
+      "end_sec": 3.842902421951294,
       "root_note_name": "E",
       "quality": "maj",
       "confidence": 0.5660581588745117
     },
     {
-      "start_sec": 4.109931945800781,
+      "start_sec": 3.842902421951294,
       "end_sec": 6.0371880531311035,
       "root_note_name": "C#",
       "quality": "min",
@@ -17,21 +17,21 @@
     },
     {
       "start_sec": 6.0371880531311035,
-      "end_sec": 8.486893653869629,
+      "end_sec": 8.742313385009766,
       "root_note_name": "A",
       "quality": "min",
       "confidence": 0.5660754442214966
     },
     {
-      "start_sec": 8.486893653869629,
-      "end_sec": 15.023310661315918,
+      "start_sec": 8.742313385009766,
+      "end_sec": 15.151020050048828,
       "root_note_name": "C#",
       "quality": "min",
       "confidence": 0.5897106528282166
     },
     {
-      "start_sec": 15.023310661315918,
-      "end_sec": 17.20598602294922,
+      "start_sec": 15.151020050048828,
+      "end_sec": 17.345306396484375,
       "root_note_name": "C",
       "quality": "maj",
       "confidence": 0.5802285671234131

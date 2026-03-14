@@ -3,8 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import random
+from pathlib import Path
+import wave
 
 import numpy as np
+
+try:
+    import librosa
+except Exception:  # pragma: no cover
+    librosa = None
 
 from hardcoded_improv.bayes_model import BayesianNoteModel, NoteContext
 from hardcoded_improv.chord_detector import ChordEvent
@@ -51,6 +58,18 @@ class PhraseConfig:
     strong_target_prob: float = 0.78
     approach_prob: float = 0.68
     max_jump_semitones: int = 9
+
+
+@dataclass
+class GrooveConfig:
+    enabled: bool = True
+    lock_strength: float = 0.7
+    density_influence: float = 0.55
+    max_offset_sec: float = 0.08
+    base_play_prob: float = 0.08
+    density_play_scale: float = 0.85
+    strong_beat_bonus: float = 0.22
+    min_density_gate: float = 0.12
 
 
 LICK_TEMPLATES: dict[str, list[list[int]]] = {
@@ -117,6 +136,117 @@ def _clamp_jump_by_octave(midi_note: int, prev_midi: int, max_jump: int = 9) -> 
         n = prev_midi - max_jump
 
     return int(max(36, min(96, n)))
+
+
+def _subdiv_positions_16th(swing_ratio: float) -> list[float]:
+    r = float(max(0.5, min(0.66, swing_ratio)))
+    return [0.0, 0.5 * r, r, r + 0.5 * (1.0 - r)]
+
+
+def _load_wav_mono_float32(path: str | Path) -> tuple[np.ndarray, int]:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"WAV not found: {p}")
+    with wave.open(str(p), "rb") as wf:
+        sr = int(wf.getframerate())
+        ch = int(wf.getnchannels())
+        sw = int(wf.getsampwidth())
+        n = int(wf.getnframes())
+        raw = wf.readframes(n)
+
+    if sw == 2:
+        x = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif sw == 1:
+        x = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif sw == 4:
+        x = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+    else:
+        raise RuntimeError(f"Unsupported WAV sample width: {sw}")
+
+    if ch > 1:
+        x = x.reshape(-1, ch)[:, 0]
+    return x.reshape(-1), sr
+
+
+def build_groove_grid_from_audio(
+    audio: np.ndarray,
+    sr: int,
+    swing_ratio: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Return groove-aligned 16th grid times, onset scores, beat times, and BPM.
+
+    Grid is derived from beat intervals and optionally swung with `swing_ratio`.
+    """
+    y = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if y.size == 0:
+        return np.array([], dtype=np.float32), np.array([], dtype=np.float32), np.array([], dtype=np.float32), 120.0
+
+    if librosa is None:
+        dur = y.size / float(sr)
+        bpm = 120.0
+        beat_period = 60.0 / bpm
+        beats = np.arange(0.0, dur + beat_period, beat_period, dtype=np.float32)
+        grid = np.arange(0.0, dur, beat_period / 4.0, dtype=np.float32)
+        scores = np.ones_like(grid, dtype=np.float32) * 0.5
+        return grid, scores, beats, bpm
+
+    hop = 512
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop, n_fft=2048)
+    tempo, beat_frames = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr, hop_length=hop, trim=False)
+    tempo_arr = np.asarray(tempo, dtype=np.float64).reshape(-1)
+    tempo_val = float(tempo_arr[0]) if tempo_arr.size else float("nan")
+    bpm = tempo_val if np.isfinite(tempo_val) and tempo_val > 0 else 120.0
+    beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop).astype(np.float32)
+
+    if beat_times.size < 2:
+        beat_period = 60.0 / bpm
+        dur = y.size / float(sr)
+        beat_times = np.arange(0.0, dur + beat_period, beat_period, dtype=np.float32)
+
+    pos = _subdiv_positions_16th(swing_ratio)
+    grid_times: list[float] = []
+    for i in range(len(beat_times) - 1):
+        t0 = float(beat_times[i])
+        t1 = float(beat_times[i + 1])
+        if t1 <= t0:
+            continue
+        d = t1 - t0
+        for p in pos:
+            grid_times.append(t0 + p * d)
+
+    grid = np.asarray(grid_times, dtype=np.float32)
+    grid = grid[(grid >= 0.0) & (grid <= (y.size / float(sr)) + 1e-6)]
+    if grid.size == 0:
+        return grid, np.array([], dtype=np.float32), beat_times, bpm
+
+    frame_times = librosa.frames_to_time(np.arange(onset_env.size), sr=sr, hop_length=hop)
+    idx = np.searchsorted(frame_times, grid, side="left")
+    idx = np.clip(idx, 0, max(0, onset_env.size - 1))
+    scores = onset_env[idx].astype(np.float32)
+    if scores.size:
+        mn, mx = float(np.min(scores)), float(np.max(scores))
+        if mx > mn + 1e-9:
+            scores = (scores - mn) / (mx - mn)
+        else:
+            scores = np.zeros_like(scores) + 0.5
+
+    logger.info(
+        "Groove grid: bpm=%.2f beats=%d grid=%d swing=%.2f onset_mean=%.3f",
+        bpm,
+        int(beat_times.size),
+        int(grid.size),
+        float(max(0.5, min(0.66, swing_ratio))),
+        float(np.mean(scores)) if scores.size else 0.0,
+    )
+    return grid, scores, beat_times, bpm
+
+
+def build_groove_grid_from_wav(
+    wav_path: str | Path,
+    swing_ratio: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    audio, sr = _load_wav_mono_float32(wav_path)
+    return build_groove_grid_from_audio(audio, sr, swing_ratio=swing_ratio)
 
 
 def _mode_from_quality(quality: str) -> str:
@@ -264,6 +394,12 @@ def generate_improv_events(
     humanize: HumanizeConfig | None = None,
     lick_cfg: LickConfig | None = None,
     phrase_cfg: PhraseConfig | None = None,
+    groove_cfg: GrooveConfig | None = None,
+    groove_offsets: list[float] | None = None,
+    groove_density: list[float] | None = None,
+    groove_grid_times: list[float] | np.ndarray | None = None,
+    groove_onset_scores: list[float] | np.ndarray | None = None,
+    groove_beat_times: list[float] | np.ndarray | None = None,
 ) -> list[NoteEvent]:
     """Generate deterministic rule-based improv MIDI events.
 
@@ -281,9 +417,11 @@ def generate_improv_events(
     hz_in = humanize if humanize is not None else humanize_config
     lk_in = lick_cfg if lick_cfg is not None else lick_config
     ph_in = phrase_cfg
+    gr_in = groove_cfg
 
-    if hz_in is None and lk_in is None and ph_in is None:
-        # "old simple style" defaults when no config knobs are provided.
+    # "old simple style" defaults per-module when not explicitly provided.
+    no_configs = hz_in is None and lk_in is None and ph_in is None and gr_in is None
+    if no_configs:
         hz = HumanizeConfig(
             swing=0.0,
             jitter_ms=0.0,
@@ -310,15 +448,29 @@ def generate_improv_events(
             approach_prob=0.0,
             max_jump_semitones=12,
         )
+        gr = GrooveConfig(enabled=False, lock_strength=0.0, density_influence=0.0, max_offset_sec=0.0)
     else:
         hz = hz_in or HumanizeConfig()
         lk = lk_in or LickConfig()
         ph = ph_in or PhraseConfig(phrase_len_bars=hz.phrase_len_bars)
+        gr = gr_in or GrooveConfig(enabled=False, lock_strength=0.0, density_influence=0.0, max_offset_sec=0.0)
 
     sec_per_beat = 60.0 / bpm
     step = sec_per_beat / 2.0  # eighth notes
     total_beats = play_bars * beats_per_bar
-    total_steps = total_beats * 2
+    total_duration = total_beats * sec_per_beat
+
+    if groove_grid_times is not None:
+        g = np.asarray(groove_grid_times, dtype=np.float32).reshape(-1)
+        g = g[(g >= 0.0) & (g < total_duration + 1e-6)]
+        candidate_times = [float(x) for x in g]
+    else:
+        candidate_times = [i * step for i in range(total_beats * 2)]
+
+    if not candidate_times:
+        return []
+
+    total_steps = len(candidate_times)
     phrase_len_steps = max(1, int(ph.phrase_len_bars) * beats_per_bar * 2)
 
     motif = _motif_rng_pattern(rng)
@@ -337,15 +489,30 @@ def generate_improv_events(
     pending_target_step: int | None = None
     pending_target_degree: int | None = None
     max_jump_semitones = max(1, int(ph.max_jump_semitones))
+    bar_len = sec_per_beat * beats_per_bar
+    notes_per_bar: dict[int, int] = {}
+    cooldown = 0
 
     boundary_times = {round(ch.start_sec, 3) for ch in chord_timeline}
+    chord_changes = sorted({float(ch.start_sec) for ch in chord_timeline if ch.start_sec > 0.0})
+
+    onset_scores = None
+    if groove_onset_scores is not None:
+        arr = np.asarray(groove_onset_scores, dtype=np.float32).reshape(-1)
+        if arr.size >= total_steps:
+            onset_scores = arr
 
     for i in range(total_steps):
-        t = i * step
+        t = float(candidate_times[i])
         phrase_id = i // phrase_len_steps
         phrase_pos = i % phrase_len_steps
         is_phrase_start = phrase_pos == 0
         is_phrase_tail = phrase_pos >= max(0, phrase_len_steps - 1)
+
+        if cooldown > 0:
+            cooldown -= 1
+            rest_count += 1
+            continue
 
         if phrase_id != last_phrase_id:
             if phrase_id % 2 == 0:
@@ -370,18 +537,49 @@ def generate_improv_events(
         scale_pcs = pentatonic_notes(chord.root_note_name, mode=mode)
         root_pc = note_name_to_pc(chord.root_note_name)
 
-        # Occasional rest (about 20%).
-        if rng.random() < 0.2:
+        slot_count = beats_per_bar * 2
+        beat_float = t / sec_per_beat
+        beat_in_bar_float = beat_float % beats_per_bar
+        slot = int(round(beat_in_bar_float * 2.0)) % slot_count
+
+        bar_idx = int(t // bar_len) if bar_len > 1e-6 else 0
+        if notes_per_bar.get(bar_idx, 0) >= 8:
             rest_count += 1
             continue
 
         near_boundary = round(t, 3) in boundary_times
         octave = base_octave + rng.choice([-1, 0, 0, 0, 1])
-        beat_pos = i % (beats_per_bar * 2)
-        beat_in_bar = (i // 2) % beats_per_bar
-        is_onbeat = i % 2 == 0
+        beat_pos = slot
+        beat_in_bar = int(beat_in_bar_float)
+        is_onbeat = slot % 2 == 0
         is_strong_beat = is_onbeat and (beat_in_bar == 0 or (beats_per_bar >= 4 and beat_in_bar == 2))
-        next_step_is_strong = ((i + 1) % 2 == 0) and (((i + 1) // 2) % beats_per_bar in {0, 2 if beats_per_bar >= 4 else 0})
+        next_step_is_strong = (slot % 2 == 1) and ((beat_in_bar in {0, 2} if beats_per_bar >= 4 else beat_in_bar == 0))
+
+        next_change = next((c for c in chord_changes if c >= t), None)
+        near_change = next_change is not None and (next_change - t) <= 0.20
+        bar_phase = t % bar_len if bar_len > 1e-6 else 0.0
+        near_bar_boundary = bar_phase <= 0.10 or (bar_len - bar_phase) <= 0.10
+
+        # Groove-gated note density: only play where source groove has energy.
+        play_prob = 1.0 - 0.2  # fallback legacy behavior when groove disabled
+        if gr.enabled and groove_density is not None and len(groove_density) >= slot_count:
+            den = float(max(0.0, min(1.0, groove_density[slot])))
+            if den < float(gr.min_density_gate):
+                rest_count += 1
+                continue
+            play_prob = float(gr.base_play_prob) + float(gr.density_play_scale) * den
+            if is_strong_beat:
+                play_prob += float(gr.strong_beat_bonus)
+            play_prob = max(0.02, min(0.98, play_prob))
+
+        if onset_scores is not None and i < onset_scores.size:
+            osc = float(max(0.0, min(1.0, onset_scores[i])))
+            play_prob = 0.15 + 0.75 * osc + 0.10 * play_prob
+            play_prob = max(0.02, min(0.98, play_prob))
+
+        if rng.random() > play_prob:
+            rest_count += 1
+            continue
 
         target_degrees = _target_degrees_for_mode(mode)
         phrase_hint = active_phrase_motif[phrase_pos % len(active_phrase_motif)] if active_phrase_motif else prev_degree
@@ -413,7 +611,7 @@ def generate_improv_events(
                     )
 
         chosen_from_lick = False
-        if near_boundary and rng.random() < 0.75:
+        if (near_boundary or near_change or near_bar_boundary) and rng.random() < 0.92:
             chosen_degree = 0
             chosen_pc = scale_pcs[chosen_degree]
             base_velocity = rng.randint(88, 112)
@@ -482,7 +680,13 @@ def generate_improv_events(
         if near_boundary and rng.random() < 0.5:
             octave = base_octave
 
-        t_h = _apply_swing_and_jitter(t, step, hz.swing, hz.jitter_ms, rng)
+        t_base = t
+        if gr.enabled and groove_offsets is not None and len(groove_offsets) >= slot_count:
+            off = float(groove_offsets[slot])
+            off = max(-float(gr.max_offset_sec), min(float(gr.max_offset_sec), off))
+            t_base = t + off * max(0.0, min(1.0, float(gr.lock_strength)))
+
+        t_h = _apply_swing_and_jitter(t_base, step, hz.swing, hz.jitter_ms, rng)
         t_h = max(0.0, t_h)
         if prev_time_h is not None:
             if t_h < prev_time_h - 0.03 or t_h <= prev_time_h:
@@ -579,6 +783,9 @@ def generate_improv_events(
                 duration_sec=float(note_dur),
             )
         )
+        notes_per_bar[bar_idx] = notes_per_bar.get(bar_idx, 0) + 1
+        if note_dur > step * 0.86:
+            cooldown = max(cooldown, 1)
 
     events.sort(key=lambda e: e.time_sec)
 
@@ -600,6 +807,10 @@ def generate_improv_events(
             float(np.min(durs)),
             float(np.max(durs)),
         )
+
+    if (humanize_debug or lick_debug) and notes_per_bar:
+        dens = ", ".join([f"bar{b}:{c}" for b, c in sorted(notes_per_bar.items())])
+        logger.info("Note density per bar: %s", dens)
 
     return events
 

@@ -1,0 +1,12 @@
+{
+  "bpm": 120.0,
+  "chords": [
+    {
+      "start_sec": 0.0,
+      "end_sec": 17.454557823129253,
+      "root_note_name": "C",
+      "quality": "maj",
+      "confidence": 0.0
+    }
+  ]
+}

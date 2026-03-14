@@ -239,6 +239,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--dry-run", action="store_true", help="Do not send MIDI, only schedule events")
     live_parser.add_argument("--output-mid", action="store_true", help="Also save output.mid artifact")
     live_parser.add_argument("--input-wav", type=str, default=None, help="Simulation mode input WAV path")
+    live_parser.add_argument("--groove-lock", type=float, default=0.98, help="Groove timing lock strength (0..1)")
+    live_parser.add_argument("--groove-gate", type=float, default=0.28, help="Minimum groove slot density to allow notes (0..1)")
+    live_parser.add_argument("--ornament-level", type=float, default=0.35, help="Ornament/lick intensity (0..1)")
     live_parser.add_argument(
         "--full-wav-listen",
         action="store_true",
@@ -295,6 +298,9 @@ def main() -> None:
                     bayes_model_path=args.bayes_model,
                     output_mid=True if args.output_mid or args.input_wav else args.output_mid,
                     full_wav_listen=args.full_wav_listen,
+                    groove_lock=args.groove_lock,
+                    groove_gate=args.groove_gate,
+                    ornament_level=args.ornament_level,
                 )
             else:
                 result = run_live_demo(
@@ -308,6 +314,9 @@ def main() -> None:
                     output_mid=args.output_mid,
                     dry_run=args.dry_run,
                     prefer_input_name=args.prefer_input_name,
+                    groove_lock=args.groove_lock,
+                    groove_gate=args.groove_gate,
+                    ornament_level=args.ornament_level,
                 )
 
             print(f"BPM: {result.bpm:.2f}")

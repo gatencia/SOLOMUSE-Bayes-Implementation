@@ -163,11 +163,95 @@ def _snap_to_nearest_beat(time_s: float, beat_times: np.ndarray) -> float:
     return float(beat_times[idx])
 
 
+def _merge_adjacent_same(events: list[ChordEvent]) -> list[ChordEvent]:
+    if not events:
+        return []
+    out: list[ChordEvent] = [events[0]]
+    for ev in events[1:]:
+        last = out[-1]
+        if ev.root_note_name == last.root_note_name and ev.quality == last.quality:
+            dur_last = max(1e-6, last.end_sec - last.start_sec)
+            dur_cur = max(1e-6, ev.end_sec - ev.start_sec)
+            conf = (last.confidence * dur_last + ev.confidence * dur_cur) / (dur_last + dur_cur)
+            out[-1] = ChordEvent(
+                start_sec=last.start_sec,
+                end_sec=max(last.end_sec, ev.end_sec),
+                root_note_name=last.root_note_name,
+                quality=last.quality,
+                confidence=float(conf),
+            )
+        else:
+            out.append(ev)
+    return out
+
+
+def _collapse_short_segments(events: list[ChordEvent], min_duration: float) -> list[ChordEvent]:
+    if not events:
+        return []
+    if min_duration <= 0:
+        return events
+
+    work = list(events)
+    i = 0
+    while i < len(work):
+        ev = work[i]
+        dur = ev.end_sec - ev.start_sec
+        if dur >= min_duration or len(work) == 1:
+            i += 1
+            continue
+
+        # Merge short segment with neighboring segment preferring same label or higher confidence.
+        left = work[i - 1] if i > 0 else None
+        right = work[i + 1] if i + 1 < len(work) else None
+
+        if left and right and left.root_note_name == right.root_note_name and left.quality == right.quality:
+            # bridge into one
+            merged_conf = float((left.confidence + right.confidence + ev.confidence) / 3.0)
+            work[i - 1] = ChordEvent(
+                start_sec=left.start_sec,
+                end_sec=right.end_sec,
+                root_note_name=left.root_note_name,
+                quality=left.quality,
+                confidence=merged_conf,
+            )
+            del work[i : i + 2]
+            i = max(0, i - 1)
+            continue
+
+        if right is not None and (left is None or right.confidence >= left.confidence):
+            work[i + 1] = ChordEvent(
+                start_sec=ev.start_sec,
+                end_sec=right.end_sec,
+                root_note_name=right.root_note_name,
+                quality=right.quality,
+                confidence=float((right.confidence + ev.confidence) / 2.0),
+            )
+            del work[i]
+            continue
+
+        if left is not None:
+            work[i - 1] = ChordEvent(
+                start_sec=left.start_sec,
+                end_sec=ev.end_sec,
+                root_note_name=left.root_note_name,
+                quality=left.quality,
+                confidence=float((left.confidence + ev.confidence) / 2.0),
+            )
+            del work[i]
+            i = max(0, i - 1)
+            continue
+
+        i += 1
+
+    return work
+
+
 def detect_chords_over_time(
     audio: np.ndarray,
     sr: int,
     frame_sec: float = 0.5,
     beat_times: np.ndarray | None = None,
+    min_chord_sec: float | None = None,
 ) -> list[ChordEvent]:
     """Detect smoothed chord events over time and optionally snap boundaries to beats."""
     y = _to_mono_float32(audio)
@@ -224,6 +308,17 @@ def detect_chords_over_time(
         )
         seg_start = i
 
+    events = _merge_adjacent_same(events)
+
+    if min_chord_sec is None:
+        if bt.size >= 2:
+            beat_period = float(np.median(np.diff(bt)))
+            min_chord_sec = max(frame_sec * 1.5, beat_period * 0.75)
+        else:
+            min_chord_sec = frame_sec * 1.5
+
+    events = _collapse_short_segments(events, min_duration=float(min_chord_sec))
+    events = _merge_adjacent_same(events)
     return events
 
 

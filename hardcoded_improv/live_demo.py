@@ -10,11 +10,25 @@ import wave
 
 import numpy as np
 
+try:
+    import librosa
+except Exception:  # pragma: no cover
+    librosa = None
+
 from hardcoded_improv.audio_io import LiveAudioInput, list_input_devices
 from hardcoded_improv.bayes_model import BayesianNoteModel
 from hardcoded_improv.chord_detector import ChordEvent, detect_chords_over_time
 from hardcoded_improv.config import AppConfig
-from hardcoded_improv.improv_engine import NoteEvent, generate_improv_events, loop_chord_progression
+from hardcoded_improv.improv_engine import (
+    GrooveConfig,
+    HumanizeConfig,
+    LickConfig,
+    NoteEvent,
+    PhraseConfig,
+    build_groove_grid_from_audio,
+    generate_improv_events,
+    loop_chord_progression,
+)
 from hardcoded_improv.midi_out import MidiOut, play_events_realtime
 from hardcoded_improv.tempo_estimator import (
     compute_listen_seconds,
@@ -124,6 +138,8 @@ def _save_output_mid(path: Path, events: list[NoteEvent], bpm: float) -> None:
     tr = mido.MidiTrack()
     mid.tracks.append(tr)
     tr.append(mido.MetaMessage("set_tempo", tempo=tempo, time=0))
+    tr.append(mido.MetaMessage("track_name", name="SOLOMUSE Lead", time=0))
+    tr.append(mido.Message("program_change", program=29, channel=0, time=0))
 
     last_tick = 0
     for t_sec, kind, note, vel in timeline:
@@ -135,6 +151,64 @@ def _save_output_mid(path: Path, events: list[NoteEvent], bpm: float) -> None:
     mid.save(str(path))
 
 
+def _extract_groove_template(
+    audio: np.ndarray,
+    sr: int,
+    beat_times: np.ndarray,
+    beats_per_bar: int = 4,
+) -> tuple[list[float], list[float]]:
+    slot_count = beats_per_bar * 2
+    if librosa is None or beat_times.size < 2:
+        return [0.0] * slot_count, [0.5] * slot_count
+
+    y = np.asarray(audio, dtype=np.float32).reshape(-1)
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=512)
+    onset_frames = librosa.onset.onset_detect(
+        onset_envelope=onset_env,
+        sr=sr,
+        hop_length=512,
+        units="time",
+        backtrack=False,
+    )
+    onset_times = np.asarray(onset_frames, dtype=np.float32)
+
+    offs: list[list[float]] = [[] for _ in range(slot_count)]
+    hits = np.zeros(slot_count, dtype=np.float64)
+    occ = np.zeros(slot_count, dtype=np.float64)
+
+    for b in range(len(beat_times) - 1):
+        t0 = float(beat_times[b])
+        t1 = float(beat_times[b + 1])
+        beat_dur = max(1e-4, t1 - t0)
+        beat_in_bar = b % beats_per_bar
+        for sub in range(2):
+            slot = beat_in_bar * 2 + sub
+            expected = t0 + (sub * 0.5) * beat_dur
+            occ[slot] += 1.0
+
+            if onset_times.size == 0:
+                continue
+
+            idx = int(np.argmin(np.abs(onset_times - expected)))
+            dt = float(onset_times[idx] - expected)
+            if abs(dt) <= min(0.09, beat_dur * 0.35):
+                offs[slot].append(dt)
+                hits[slot] += 1.0
+
+    offsets: list[float] = []
+    density: list[float] = []
+    for s in range(slot_count):
+        if offs[s]:
+            offsets.append(float(np.median(np.asarray(offs[s], dtype=np.float64))))
+        else:
+            offsets.append(0.0)
+
+        d = hits[s] / occ[s] if occ[s] > 0 else 0.0
+        density.append(float(max(0.0, min(1.0, d))))
+
+    return offsets, density
+
+
 def _compute_pipeline(
     listen_audio: np.ndarray,
     sr: int,
@@ -142,12 +216,16 @@ def _compute_pipeline(
     play_bars: int,
     seed: int | None,
     bayes_model_path: str | None,
+    groove_lock: float = 0.98,
+    groove_gate: float = 0.28,
+    ornament_level: float = 0.35,
 ) -> tuple[float, list[ChordEvent], list[NoteEvent]]:
     bpm = estimate_bpm(listen_audio, sr, previous_bpm=120.0)
     if not np.isfinite(bpm) or bpm <= 0:
         raise RuntimeError("Failed to estimate BPM from listen audio")
 
-    beat_times = estimate_beat_times(listen_audio, sr)
+    grid_times, grid_scores, beat_times, _ = build_groove_grid_from_audio(listen_audio, sr, swing_ratio=0.5)
+    groove_offsets, groove_density = _extract_groove_template(listen_audio, sr, beat_times, beats_per_bar=4)
     chords = detect_chords_over_time(listen_audio, sr, frame_sec=0.5, beat_times=beat_times)
     if not chords:
         raise RuntimeError("Chord timeline is empty; cannot continue demo")
@@ -163,6 +241,8 @@ def _compute_pipeline(
             raise RuntimeError(f"Bayes model not found: {model_path}")
         bayes_model = BayesianNoteModel.load_json(str(model_path))
 
+    orn = float(max(0.0, min(1.0, ornament_level)))
+
     events = generate_improv_events(
         bpm=bpm,
         chord_timeline=play_chords,
@@ -170,6 +250,46 @@ def _compute_pipeline(
         beats_per_bar=4,
         seed=seed,
         bayes_model=bayes_model,
+        humanize=HumanizeConfig(
+            swing=0.0,
+            jitter_ms=4.0,
+            vel_jitter=4,
+            phrase_len_bars=2,
+            phrase_gap_prob=0.05,
+            staccato_prob=0.15,
+            legato_prob=0.25,
+            min_dur_frac=0.45,
+            max_dur_frac=0.9,
+        ),
+        lick_cfg=LickConfig(
+            lick_prob_on_boundary=0.08 * orn,
+            lick_prob_on_phrase_start=0.12 * orn,
+            grace_note_prob=0.05 * orn,
+            slide_prob=0.03 * orn,
+            max_lick_len_steps=4,
+        ),
+        phrase_cfg=PhraseConfig(
+            phrase_len_bars=2,
+            enable_call_response=True,
+            strong_target_prob=0.82,
+            approach_prob=0.78,
+            max_jump_semitones=7,
+        ),
+        groove_cfg=GrooveConfig(
+            enabled=True,
+            lock_strength=max(0.0, min(1.0, groove_lock)),
+            density_influence=0.75,
+            max_offset_sec=0.06,
+            base_play_prob=0.04,
+            density_play_scale=0.84,
+            strong_beat_bonus=0.25,
+            min_density_gate=max(0.0, min(0.8, groove_gate)),
+        ),
+        groove_offsets=groove_offsets,
+        groove_density=groove_density,
+        groove_grid_times=grid_times,
+        groove_onset_scores=grid_scores,
+        groove_beat_times=beat_times,
     )
     if not events:
         raise RuntimeError("Generated event list is empty")
@@ -188,6 +308,9 @@ def run_live_demo(
     output_mid: bool = False,
     dry_run: bool = False,
     prefer_input_name: str = "scarlett",
+    groove_lock: float = 0.98,
+    groove_gate: float = 0.28,
+    ornament_level: float = 0.35,
 ) -> LiveDemoResult:
     if listen_bars <= 0 or play_bars <= 0:
         raise ValueError("listen_bars and play_bars must be > 0")
@@ -218,6 +341,9 @@ def run_live_demo(
         play_bars=play_bars,
         seed=seed,
         bayes_model_path=bayes_model_path,
+        groove_lock=groove_lock,
+        groove_gate=groove_gate,
+        ornament_level=ornament_level,
     )
 
     listen_wav = out_dir / "listen_audio.wav"
@@ -263,6 +389,9 @@ def run_simulation_demo(
     bayes_model_path: str | None = None,
     output_mid: bool = True,
     full_wav_listen: bool = False,
+    groove_lock: float = 0.98,
+    groove_gate: float = 0.28,
+    ornament_level: float = 0.35,
 ) -> LiveDemoResult:
     if listen_bars <= 0 or play_bars <= 0:
         raise ValueError("listen_bars and play_bars must be > 0")
@@ -301,6 +430,9 @@ def run_simulation_demo(
         play_bars=play_bars,
         seed=seed,
         bayes_model_path=bayes_model_path,
+        groove_lock=groove_lock,
+        groove_gate=groove_gate,
+        ornament_level=ornament_level,
     )
 
     listen_wav = out_dir / "listen_audio.wav"
